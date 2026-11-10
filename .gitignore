@@ -1,0 +1,15 @@
+build*/
+cmake-build-*/
+out/
+.cache/
+compile_commands.json
+CMakeUserPresets.json
+*.user
+.vs/
+.vscode/
+.idea/
+.DS_Store
+__pycache__/
+node_modules/
+extensions/vscode/out/
+*.vsix

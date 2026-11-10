@@ -1,0 +1,144 @@
+# Builds ready-to-run packages for Windows, Linux and macOS.
+# Run it from the Actions tab ("Run workflow"), or push a tag like v0.1.0 to also
+# publish a GitHub Release with the files attached.
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: '6.8.3'
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Configure (libclang from the preinstalled LLVM)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DLIBCLANG_ROOT="C:/Program Files/LLVM"
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: |
+          $dist = "CodeTrace-windows-x64"
+          New-Item -ItemType Directory $dist | Out-Null
+          Copy-Item build/apps/desktop-qt/Release/CodeTrace.exe $dist/
+          Copy-Item build/apps/cli/Release/codetrace.exe $dist/
+          if (Test-Path "C:/Program Files/LLVM/bin/libclang.dll") { Copy-Item "C:/Program Files/LLVM/bin/libclang.dll" $dist/ }
+          windeployqt --release --no-translations --compiler-runtime $dist/CodeTrace.exe
+          Copy-Item README.md, LICENSE $dist/
+          Compress-Archive -Path $dist -DestinationPath "$dist.zip"
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          ./CodeTrace-windows-x64/codetrace.exe backends
+          ./CodeTrace-windows-x64/codetrace.exe analyze tests/fixtures/sample_project --quiet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodeTrace-windows-x64
+          path: CodeTrace-windows-x64.zip
+
+  linux:
+    runs-on: ubuntu-22.04   # older glibc => runs on more distributions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libclang-14-dev libxcb-cursor0 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libfuse2
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Desktop smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./build/apps/desktop-qt/CodeTrace tests/fixtures/sample_project --select open_account --screenshot smoke.png
+      - name: Package AppImage + tarball
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          QMAKE: ${{ env.QT_ROOT_DIR }}/bin/qmake
+          EXTRA_QT_PLUGINS: 'svg'
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+          export LD_LIBRARY_PATH="$QT_ROOT_DIR/lib:$LD_LIBRARY_PATH"
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            -e build/apps/desktop-qt/CodeTrace -e build/apps/cli/codetrace \
+            -d packaging/linux/codetrace.desktop -i packaging/icons/codetrace.png \
+            --plugin qt --output appimage
+          mv CodeTrace*.AppImage CodeTrace-linux-x86_64.AppImage
+          cp README.md LICENSE AppDir/
+          tar -czf CodeTrace-linux-x86_64.tar.gz --transform 's,^AppDir,CodeTrace-linux-x86_64,' AppDir
+          ./AppDir/usr/bin/codetrace analyze tests/fixtures/sample_project --quiet | head -3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodeTrace-linux-x86_64
+          path: |
+            CodeTrace-linux-x86_64.AppImage
+            CodeTrace-linux-x86_64.tar.gz
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+      - name: Configure (C++ uses the built-in analyzer; no libclang to bundle)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCODETRACE_WITH_LIBCLANG=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          macdeployqt build/apps/desktop-qt/CodeTrace.app -dmg
+          mv build/apps/desktop-qt/CodeTrace.dmg CodeTrace-macos-arm64.dmg
+          mkdir codetrace-cli && cp build/apps/cli/codetrace README.md LICENSE codetrace-cli/
+          zip -r CodeTrace-macos-arm64-cli.zip codetrace-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodeTrace-macos-arm64
+          path: |
+            CodeTrace-macos-arm64.dmg
+            CodeTrace-macos-arm64-cli.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            CodeTrace-windows-x64.zip
+            CodeTrace-linux-x86_64.AppImage
+            CodeTrace-linux-x86_64.tar.gz
+            CodeTrace-macos-arm64.dmg
+            CodeTrace-macos-arm64-cli.zip

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CodeTrace
+Comment=Static analysis and call graphs for C++, Python and JavaScript
+Exec=CodeTrace %F
+Icon=codetrace
+Categories=Development;IDE;
+Terminal=false
